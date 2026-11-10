@@ -142,7 +142,7 @@ CuSparseSpMatCsrDescriptor::CuSparseSpMatCsrDescriptor(const Tensor& input, int6
   auto col_indices = input.col_indices();
   auto values = input.values();
   auto nnz = values.size(-1);
-  values_ = values.expect_contiguous();
+  values_ = values.contiguous();
 
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(crow_indices.is_contiguous());
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(col_indices.is_contiguous());
@@ -158,7 +158,7 @@ CuSparseSpMatCsrDescriptor::CuSparseSpMatCsrDescriptor(const Tensor& input, int6
   auto col_indices_batch_stride =
       col_indices.dim() >= 2 && batch_offset >= 0 ? col_indices.stride(-2) : 0;
   auto values_batch_stride =
-      values.dim() >= 2 && batch_offset >= 0 ? values_->stride(-2) : 0;
+      values.dim() >= 2 && batch_offset >= 0 ? values_.stride(-2) : 0;
 
   cusparseSpMatDescr_t raw_descriptor = nullptr;
   TORCH_CUDASPARSE_CHECK(cusparseCreateCsr(
@@ -173,7 +173,7 @@ CuSparseSpMatCsrDescriptor::CuSparseSpMatCsrDescriptor(const Tensor& input, int6
       static_cast<char*>(col_indices.data_ptr()) +
           batch_offset * col_indices_batch_stride * col_indices.itemsize(),
       // values of the sparse matrix, size = nnz
-      static_cast<char*>(values_->data_ptr()) +
+      static_cast<char*>(values_.data_ptr()) +
           batch_offset * values_batch_stride * values.itemsize(),
       index_type, // data type of row offsets index
       index_type, // data type of col indices
@@ -196,15 +196,15 @@ CuSparseSpMatCsrDescriptor::CuSparseSpMatCsrDescriptor(const Tensor& input, int6
           crow_indices.dim(), ", ", col_indices.dim(), " and ", values.dim());
       // cuSPARSE uses a single batch stride for column indices and values.
       TORCH_CHECK(
-          col_indices.stride(-2) == values_->stride(-2),
+          col_indices.stride(-2) == values_.stride(-2),
           "Expected col_indices and values of a batched CSR tensor to have "
           "equal batch strides, got ",
-          col_indices.stride(-2), " and ", values_->stride(-2));
+          col_indices.stride(-2), " and ", values_.stride(-2));
       TORCH_CUDASPARSE_CHECK(cusparseCsrSetStridedBatch(
           raw_descriptor,
           batch_count,
           crow_indices.stride(-2),
-          values_->stride(-2)));
+          values_.stride(-2)));
     } else {
       // cuSPARSE allows broadcasting of indices and values across batches for
       // batched matmul

@@ -213,7 +213,8 @@ class TORCH_CUDA_CPP_API CuSparseSpMatCsrDescriptor
 #endif
 
  private:
-  c10::MaybeOwned<Tensor> values_;
+  // Keeps the contiguous copy of values alive while cuSPARSE points into it.
+  Tensor values_;
 };
 
 #if AT_USE_CUSPARSE_GENERIC_SPSV()
