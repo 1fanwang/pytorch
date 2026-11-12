@@ -150,6 +150,33 @@ class B2BGEMMTest(TestCase):
         self.assertTrue(torch.allclose(f_32(A, B, C), res, atol=0.1, rtol=0.01))
         self.assertGreater(counters["inductor"]["b2b_gemm"], 0)
 
+    @recover_orig_fp32_precision
+    @torch._dynamo.config.patch(recompile_limit=32)
+    @torch._inductor.config.patch(b2b_gemm_pass=True)
+    def test_b2b_gemm_fp32_ieee_precision(self):
+        def left(m1: torch.Tensor, m2: torch.Tensor, m3: torch.Tensor) -> torch.Tensor:
+            return torch.mm(torch.mm(m1, m2), m3)
+
+        def right(m1: torch.Tensor, m2: torch.Tensor, m3: torch.Tensor) -> torch.Tensor:
+            return torch.mm(m1, torch.mm(m2, m3))
+
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.manual_seed(0)
+        for f, (M, N, O, P) in (
+            (left, (256, 32, 256, 32)),
+            (right, (32, 256, 32, 256)),
+        ):
+            with self.subTest(f.__name__):
+                torch._dynamo.reset()
+                counters.clear()
+                A = torch.randn((M, N), device=self.device)
+                B = torch.randn((N, O), device=self.device)
+                C = torch.randn((O, P), device=self.device)
+                res = torch.compile(f)(A, B, C)
+                self.assertGreater(counters["inductor"]["b2b_gemm"], 0)
+                ref = f(A.double(), B.double(), C.double()).float()
+                torch.testing.assert_close(res, ref, atol=1e-3, rtol=1e-4)
+
     @torch._dynamo.config.patch(recompile_limit=32)
     @torch._inductor.config.patch(b2b_gemm_pass=True)
     def test_b2b_gemm_bad_pattern_good_shape(self):

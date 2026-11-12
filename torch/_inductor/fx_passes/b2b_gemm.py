@@ -7,6 +7,7 @@ from torch.utils._ordered_set import OrderedSet
 from torch.utils._pytree import tree_map
 
 from ..._dynamo.utils import counters
+from ..heuristics.template.triton import mm_allow_tf32
 from ..ir import (
     ComputedBuffer,
     FixedLayout,
@@ -101,7 +102,7 @@ b2b_gemm_left_template = TritonTemplate(
             b_mask = (offs_n[:, None] < N) & (offs_o[None, :] < O)
             b_ptrs = B + (offs_n[:, None] * stride_bn + offs_o[None, :] * stride_bo)
             b = tl.load(b_ptrs, mask=b_mask, other=0.0).to(tl.float32)  # BLOCK_SIZE_N * BLOCK_SIZE_O
-            acc_ab += tl.dot(a, b, out_dtype=tl.float32)
+            acc_ab += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=tl.float32)
             offs_n += BLOCK_SIZE_N
         # apply the subgraph
         {{ modification(
@@ -109,11 +110,8 @@ b2b_gemm_left_template = TritonTemplate(
             output_name="post_subgraph_acc_ab",
             inner_mm="acc_ab"
         ) | indent_except_first(2) }}
-        acc += tl.dot(post_subgraph_acc_ab, c, out_dtype=tl.float32)
+        acc += tl.dot(post_subgraph_acc_ab, c, allow_tf32=ALLOW_TF32, out_dtype=tl.float32)
         offs_o += BLOCK_SIZE_O
-
-    # type conversion
-    acc = acc.to(tl.float16)
 
     # store preparation
     idx_m = offs_m[:, None]
@@ -183,7 +181,7 @@ b2b_gemm_right_template = TritonTemplate(
             c_mask = (offs_o[:, None] < O) & (offs_p[None, :] < P)
             c_ptrs = C + (offs_o[:, None] * stride_co + offs_p[None, :] * stride_cp)
             c = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)  # BLOCK_SIZE_O * BLOCK_SIZE_P
-            acc_bc += tl.dot(b, c, out_dtype=tl.float32)
+            acc_bc += tl.dot(b, c, allow_tf32=ALLOW_TF32, out_dtype=tl.float32)
             offs_o += BLOCK_SIZE_O
         # apply the subgraph
         {{ modification(
@@ -191,11 +189,8 @@ b2b_gemm_right_template = TritonTemplate(
             output_name="post_subgraph_acc_bc",
             inner_mm="acc_bc"
         ) | indent_except_first(2) }}
-        acc += tl.dot(a, post_subgraph_acc_bc, out_dtype=tl.float32)
+        acc += tl.dot(a, post_subgraph_acc_bc, allow_tf32=ALLOW_TF32, out_dtype=tl.float32)
         offs_n += BLOCK_SIZE_N
-
-    # type conversion
-    acc = acc.to(tl.float16)
 
     # store preparation
     idx_m = offs_m[:, None]
@@ -571,6 +566,14 @@ def tuned_b2b_gemm(
         placeholders,  # type: ignore[arg-type, list-item]
         subgraph,
     )
+    M, N = A.get_size()
+    O, P = C.get_size()
+    device_type: str = A.get_device_or_error().type
+    gemm_mnk = [(M, O, N), (M, P, O)] if is_left_assoc else [(N, P, O), (M, P, N)]
+    # Half-precision values lose nothing in TF32; fp32 must follow eager's precision.
+    allow_tf32: bool = A.get_dtype() in (torch.float16, torch.bfloat16) or all(
+        mm_allow_tf32(m, n, k, device_type) for m, n, k in gemm_mnk
+    )
     choices: list[TritonTemplateCaller] = []
     for config in b2b_gemm_configs:
         if is_left_assoc:
@@ -579,6 +582,7 @@ def tuned_b2b_gemm(
                 input_nodes=(A, B, C),
                 layout=layout,
                 subgraphs=[subgraph_buffer],
+                ALLOW_TF32=allow_tf32,
                 **config,
             )
         else:
@@ -587,6 +591,7 @@ def tuned_b2b_gemm(
                 input_nodes=(A, B, C),
                 layout=layout,
                 subgraphs=[subgraph_buffer],
+                ALLOW_TF32=allow_tf32,
                 **config,
             )
     # add the unoptimized choice to mitigate performance degradation
